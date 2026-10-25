@@ -53,10 +53,10 @@ jobs:
         if: matrix.platform == 'win'
         run: npx electron-builder --win nsis --publish always
         env:
-          GH_TOKEN: ${{ secrets.GITT_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
 
       - name: Publish macOS
         if: matrix.platform == 'mac'
         run: npx electron-builder --mac dmg zip --publish always
         env:
-          GH_TOKEN: ${{ secrets.GITT_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
