@@ -26,6 +26,17 @@ jobs:
       - name: Checkout source
         uses: actions/checkout@v4
 
+      - name: Validate release token
+        shell: bash
+        env:
+          RELEASE_TOKEN: ${{ secrets.GITT_TOKEN }}
+        run: |
+          if [ -z "$RELEASE_TOKEN" ]; then
+            echo "ERROR: Secret GITT_TOKEN is missing or empty."
+            exit 1
+          fi
+          echo "Release token is present. Value is hidden."
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
