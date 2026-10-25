@@ -1,0 +1,113 @@
+{
+  "name": "vaniclip-desktop",
+  "version": "0.4.2",
+  "description": "VaniClip Desktop - App tao & chinh sua clip ngan (PoC)",
+  "author": "VaniClip",
+  "main": "electron/main.cjs",
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently -k -n VITE,ELECTRON -c cyan,green \"npm:dev:vite\" \"npm:dev:electron\"",
+    "dev:vite": "vite",
+    "dev:electron": "wait-on tcp:5173 && cross-env NODE_ENV=development electron .",
+    "build": "vite build",
+    "preview": "vite preview",
+    "test": "npm run test:unit && node test-ffmpeg.cjs",
+    "test:unit": "node test-project-model.mjs && node test-tracks.mjs && node test-timelines.mjs && node test-script-plan.mjs && node test-commands.mjs && node test-static.cjs",
+    "test:e2e": "node e2e/run.cjs",
+    "test:ai": "node test-ai.cjs",
+    "dist": "vite build && electron-builder",
+    "test:dl": "node test-dl.cjs",
+    "test:face": "node test-face.cjs",
+    "dist:mac": "vite build && electron-builder --mac dmg zip",
+    "dist:mac:x64": "vite build && electron-builder --mac dmg zip --x64",
+    "dist:mac:arm64": "vite build && electron-builder --mac dmg zip --arm64",
+    "publish:win": "npm run build && electron-builder --win nsis --publish always",
+    "publish:mac": "npm run build && electron-builder --mac dmg zip --publish always",
+    "publish:all": "npm run build && electron-builder --win nsis --mac dmg zip --publish always"
+  },
+  "dependencies": {
+    "@huggingface/transformers": "^4.2.0",
+    "ffmpeg-static": "^5.2.0",
+    "ffprobe-static": "^3.1.0",
+    "fluent-ffmpeg": "^2.1.3",
+    "lucide-react": "^1.22.0",
+    "electron-updater": "^6.3.9"
+  },
+  "devDependencies": {
+    "@babel/core": "^7.28.0",
+    "@vitejs/plugin-react": "^4.3.4",
+    "concurrently": "^9.1.2",
+    "cross-env": "^7.0.3",
+    "electron": "^33.2.1",
+    "electron-builder": "^25.1.8",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "vite": "^6.0.7",
+    "wait-on": "^8.0.1"
+  },
+  "build": {
+    "appId": "com.vaniclip.desktop",
+    "productName": "VaniClip",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "src/shared/**/*",
+      "!**/node_modules/onnxruntime-node/bin/napi-v6/darwin",
+      "!**/node_modules/onnxruntime-node/bin/napi-v6/linux",
+      "!**/node_modules/onnxruntime-node/bin/napi-v6/win32/arm64",
+      "!**/node_modules/ffprobe-static/bin/darwin",
+      "!**/node_modules/ffprobe-static/bin/linux",
+      "!**/node_modules/ffprobe-static/bin/win32/ia32",
+      "!**/node_modules/@huggingface/transformers/dist/*.mjs.map",
+      "!**/node_modules/sharp/vendor/**/*.h",
+      "!**/*.md",
+      "!**/*.d.ts"
+    ],
+    "asarUnpack": [
+      "**/node_modules/ffmpeg-static/**",
+      "**/node_modules/ffprobe-static/**",
+      "**/node_modules/onnxruntime-node/**",
+      "**/node_modules/sharp/**"
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": "build/icon.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "shortcutName": "VaniClip"
+    },
+    "mac": {
+      "category": "public.app-category.video",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
+      ]
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "tranvietduc93",
+        "repo": "VaniClip-Desktop",
+        "releaseType": "release"
+      }
+    ]
+  }
+}

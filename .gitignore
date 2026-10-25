@@ -1,0 +1,21 @@
+node_modules/
+dist/
+release/
+.testout/
+*.log
+.DS_Store
+
+# Models qua lon cho GitLab (>100MB/file)
+models/inswapper_128.onnx
+models/w600k_r50.onnx
+
+# Codex build/check scratch artifacts
+.codex-release*/
+.codex-tmp/
+.env
+.env.*
+!.env.example
+
+# Runtime-downloaded model/tool files are not redistributed by this repository.
+bin/
+models/

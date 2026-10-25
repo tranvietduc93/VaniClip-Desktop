@@ -1,0 +1,9 @@
+[
+  { "k": "none", "css": [], "ff": null },
+  { "k": "bright", "css": [["brightness", 0.12], ["contrast", 0.05]], "ff": { "eq": { "brightness": 0.06, "contrast": 1.1 } } },
+  { "k": "warm", "css": [["saturate", 0.15], ["sepia", 0.18]], "ff": { "colorbalance": { "rm": 0.12, "gm": 0.04, "bm": -0.12 } } },
+  { "k": "cool", "css": [["saturate", 0.1], ["hue-rotate", -12]], "ff": { "colorbalance": { "rm": -0.1, "bm": 0.12 } } },
+  { "k": "vivid", "css": [["saturate", 0.5], ["contrast", 0.12]], "ff": { "eq": { "saturation": 1.5, "contrast": 1.12 } } },
+  { "k": "bw", "css": [["grayscale", 1]], "ff": { "hue": { "s": 0 } } },
+  { "k": "vintage", "css": [["sepia", 0.45], ["contrast", -0.08], ["saturate", 0.1]], "ff": { "colorbalance": { "rm": 0.15, "gm": 0.02, "bm": -0.12 }, "eq": { "contrast": -0.08, "saturation": -0.1 } } }
+]
