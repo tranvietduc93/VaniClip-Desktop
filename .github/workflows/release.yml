@@ -11,8 +11,9 @@ permissions:
 
 jobs:
   release:
-    strategy:
+     strategy:
       fail-fast: false
+      max-parallel: 1
       matrix:
         include:
           - os: windows-latest
