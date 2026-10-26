@@ -36,6 +36,28 @@ export default function AudioTab({
 }) {
   const { t } = useI18n()
   const [acc, setAcc] = useState({ music: true, tts: true, redub: false, slide: true })
+  const [elevenLabsEmail, setElevenLabsEmail] = useState('')
+  const [elevenLabsAccounts, setElevenLabsAccounts] = useState(() => {
+    try { return JSON.parse(localStorage.getItem('vaniclip.elevenlabs.accounts') || '[]') } catch { return [] }
+  })
+  const saveElevenLabsAccounts = (items) => {
+    setElevenLabsAccounts(items)
+    try { localStorage.setItem('vaniclip.elevenlabs.accounts', JSON.stringify(items)) } catch {}
+  }
+  const addElevenLabsAccount = () => {
+    const email = elevenLabsEmail.trim()
+    if (!email || !/^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(email)) return
+    if (elevenLabsAccounts.some((a) => a.email.toLowerCase() === email.toLowerCase())) {
+      window.vaniclip?.openElevenLabsAccount?.(elevenLabsAccounts.find((a) => a.email.toLowerCase() === email.toLowerCase()).id)
+      return
+    }
+    const item = { id: `el_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`, email }
+    const items = [...elevenLabsAccounts, item]
+    saveElevenLabsAccounts(items)
+    setElevenLabsEmail('')
+    window.vaniclip?.openElevenLabsAccount?.(item.id)
+  }
+
   const hasMusicTrack = audioItems.some((item) => item.track === 'music')
   const hasVoiceTrack = audioItems.some((item) => item.track === 'voice')
   const selectedVoice = ttsVoices.find((v) => v.name === ttsVoice)
@@ -70,6 +92,22 @@ export default function AudioTab({
       </Sec>
 
       <Sec id="tts" title={t('tts_label')} acc={acc} setAcc={setAcc}>
+        <div className="bg-box">
+          <label className="vlbl">Tài khoản ElevenLabs (đăng nhập website)</label>
+          <small className="cap-hint">Mỗi tài khoản mở trong một cửa sổ và phiên đăng nhập riêng. Chỉ lưu email/nhãn tài khoản trong VaniClip; mật khẩu được nhập trực tiếp trên website ElevenLabs.</small>
+          <div className="key-row">
+            <input className="cc-key" type="email" value={elevenLabsEmail} onChange={(e) => setElevenLabsEmail(e.target.value)} placeholder="email@example.com" />
+            <button className="cc-mini" onClick={addElevenLabsAccount} disabled={!elevenLabsEmail.trim()}>Thêm / đăng nhập</button>
+          </div>
+          {!!elevenLabsAccounts.length && <div style={{ display: 'grid', gap: 6, marginTop: 8 }}>
+            {elevenLabsAccounts.map((account) => <div className="key-row" key={account.id}>
+              <span style={{ flex: 1, minWidth: 0, overflowWrap: 'anywhere' }}>{account.email}</span>
+              <button className="cc-mini" onClick={() => window.vaniclip?.openElevenLabsAccount?.(account.id)}>Mở đăng nhập</button>
+              <button className="cc-mini" onClick={() => saveElevenLabsAccounts(elevenLabsAccounts.filter((a) => a.id !== account.id))}>Xóa</button>
+            </div>)}
+          </div>}
+          <small className="cap-hint">Lưu ý: cửa sổ website quản lý phiên đăng nhập; chức năng tạo giọng nói hiện tại vẫn dùng các engine Local/Google bên dưới. Tự động chuyển tài khoản trong luồng tạo giọng ElevenLabs cần API/tích hợp tạo âm thanh riêng, chưa được kích hoạt chỉ bằng đăng nhập website.</small>
+        </div>
         <label className="vlbl">{t('tts_engine')}</label>
         <select className="cc-select" value={ttsEngine} onChange={(e) => setTtsEngine(e.target.value)} disabled={ttsBusy}>
           <option value="local">{t('tts_eng_local')}</option>

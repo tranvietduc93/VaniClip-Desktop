@@ -4,6 +4,7 @@ const { contextBridge, ipcRenderer, webUtils } = require('electron')
 // UI chi goi duoc dung nhung ham duoc khai bao o day.
 contextBridge.exposeInMainWorld('vaniclip', {
   checkForUpdates: () => ipcRenderer.invoke('updater:check'),
+  openElevenLabsAccount: (accountId) => ipcRenderer.invoke('elevenlabs:openAccount', accountId),
   onUpdateProgress: (cb) => { const handler = (_e, pct) => cb(pct); ipcRenderer.on('updater:progress', handler); return () => ipcRenderer.removeListener('updater:progress', handler) },
   onUpdateError: (cb) => { const handler = (_e, message) => cb(message); ipcRenderer.on('updater:error', handler); return () => ipcRenderer.removeListener('updater:error', handler) },
   platform: process.platform,

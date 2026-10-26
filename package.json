@@ -1,6 +1,6 @@
 {
   "name": "vaniclip-desktop",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "description": "VaniClip Desktop - App tao & chinh sua clip ngan (PoC)",
   "author": "VaniClip",
   "main": "electron/main.cjs",

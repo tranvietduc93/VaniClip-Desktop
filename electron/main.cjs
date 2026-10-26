@@ -172,6 +172,33 @@ async function checkForAppUpdates() {
 }
 ipcMain.handle('updater:check', () => checkForAppUpdates())
 
+// ElevenLabs: mo cua so website rieng cho tung profile/session.
+const elevenLabsWindows = new Map()
+ipcMain.handle('elevenlabs:openAccount', async (_event, accountId) => {
+  const id = String(accountId || '').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 64)
+  if (!id) return { ok: false, reason: 'Mã tài khoản không hợp lệ.' }
+  const existing = elevenLabsWindows.get(id)
+  if (existing && !existing.isDestroyed()) { existing.focus(); return { ok: true } }
+  const partition = `persist:elevenlabs-${crypto.createHash('sha256').update(id).digest('hex').slice(0, 20)}`
+  const win = new BrowserWindow({
+    width: 1120, height: 820, minWidth: 760, minHeight: 600,
+    title: 'ElevenLabs — đăng nhập tài khoản',
+    webPreferences: { partition, contextIsolation: true, nodeIntegration: false, sandbox: true }
+  })
+  elevenLabsWindows.set(id, win)
+  win.on('closed', () => { if (elevenLabsWindows.get(id) === win) elevenLabsWindows.delete(id) })
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    if (/^https:\/\/(elevenlabs\.io|www\.elevenlabs\.io|accounts\.google\.com|google\.com)(\/|$)/i.test(url)) {
+      return { action: 'allow' }
+    }
+    shell.openExternal(url).catch(() => {})
+    return { action: 'deny' }
+  })
+  try { await win.loadURL('https://elevenlabs.io/app') ; return { ok: true } }
+  catch (err) { if (!win.isDestroyed()) win.close(); return { ok: false, reason: String(err.message || err) } }
+})
+
+
 app.whenReady().then(() => {
   configureAutoUpdater()
   registerMediaProtocol()
