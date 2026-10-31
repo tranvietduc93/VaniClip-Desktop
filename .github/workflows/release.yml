@@ -1,4 +1,4 @@
-﻿
+
 name: Build and Release VaniClip
 
 on:
@@ -99,13 +99,27 @@ jobs:
       - name: Save Universal installer and updater files
         shell: bash
         run: |
-          cp release/*.dmg "mac-release/VaniClip-${VERSION}-universal.dmg"
-          cp release/*.zip mac-release/
-          cp release/latest-mac.yml mac-release/
+          set -euxo pipefail
 
-          if compgen -G "release/*.blockmap" > /dev/null; then
-            cp release/*.blockmap mac-release/
-          fi
+          echo "===== CURRENT DIRECTORY ====="
+          pwd
+
+          echo "===== ALL RELEASE FILES ====="
+          find release -maxdepth 2 -type f -print
+
+          echo "===== CHECK UNIVERSAL FILES ====="
+          test -f "release/VaniClip-${VERSION}-universal.dmg"
+          test -f "release/VaniClip-${VERSION}-universal-mac.zip"
+
+          mkdir -p mac-release
+
+          cp "release/VaniClip-${VERSION}-universal.dmg" mac-release/
+          cp "release/VaniClip-${VERSION}-universal-mac.zip" mac-release/
+          cp release/latest-mac.yml mac-release/
+          cp release/*.blockmap mac-release/
+
+          echo "===== COPIED FILES ====="
+          find mac-release -maxdepth 1 -type f -print
 
       - name: Upload macOS release files
         uses: actions/upload-artifact@v4
