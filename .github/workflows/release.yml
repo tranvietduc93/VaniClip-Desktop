@@ -53,9 +53,11 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+
   build-macos:
-    name: Build macOS
+    name: Build macOS Intel and Universal
     runs-on: macos-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -72,20 +74,47 @@ jobs:
       - name: Build renderer
         run: npm run build
 
-      - name: Build macOS installers
-        run: npx electron-builder --mac dmg zip --publish never
+      - name: Prepare output folder
+        shell: bash
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          mkdir -p mac-release
 
-      - name: Upload macOS files
+      - name: Build macOS Intel x64 (unsigned)
+        run: |
+          npx electron-builder --mac dmg --x64 --publish never
+          cp release/*.dmg "mac-release/VaniClip-${VERSION}-x64.dmg"
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+
+      - name: Clean build output
+        run: rm -rf release/*
+
+      - name: Build macOS Universal (unsigned)
+        run: npx electron-builder --mac dmg zip --universal --publish never
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+
+      - name: Save Universal installer and updater files
+        shell: bash
+        run: |
+          cp release/*.dmg "mac-release/VaniClip-${VERSION}-universal.dmg"
+          cp release/*.zip mac-release/
+          cp release/latest-mac.yml mac-release/
+
+          if compgen -G "release/*.blockmap" > /dev/null; then
+            cp release/*.blockmap mac-release/
+          fi
+
+      - name: Upload macOS release files
         uses: actions/upload-artifact@v4
         with:
           name: vaniclip-macos
-          path: |
-            release/*.dmg
-            release/*.zip
-            release/latest-mac.yml
-            release/*.blockmap
+          path: mac-release/*
           if-no-files-found: error
           retention-days: 7
+
 
   publish-release:
     name: Publish GitHub Release
@@ -114,32 +143,21 @@ jobs:
           name: vaniclip-macos
           path: release
 
+      - name: Set version
+        shell: bash
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
       - name: Verify release files
         shell: bash
         run: |
           echo "Release files:"
           find release -maxdepth 1 -type f -print
+
           test -n "$(find release -maxdepth 1 -name '*.exe' -print -quit)"
           test -f release/latest.yml
-          test -n "$(find release -maxdepth 1 -name '*.dmg' -print -quit)"
+          test -f "release/VaniClip-${VERSION}-x64.dmg"
+          test -f "release/VaniClip-${VERSION}-universal.dmg"
+          test -n "$(find release -maxdepth 1 -name '*.zip' -print -quit)"
           test -f release/latest-mac.yml
-
-      - name: Create or update GitHub Release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        shell: bash
-        run: |
-          VERSION=$(node -p "require('./package.json').version")
-          TAG="v${VERSION}"
-
-          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release create "$TAG" \
-              --repo "$GITHUB_REPOSITORY" \
-              --target "$GITHUB_SHA" \
-              --title "VaniClip ${VERSION}" \
-              --notes "VaniClip ${VERSION} release"
-          fi
-
-          gh release upload "$TAG" release/* \
-            --repo "$GITHUB_REPOSITORY" \
-            --clobber
