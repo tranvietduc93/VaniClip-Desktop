@@ -32,7 +32,7 @@ function cacheFingerprint(input, params) {
   return crypto.createHash('sha256').update(value).digest('hex').slice(0, 24)
 }
 function previewProxyFingerprint(input) {
-  return cacheFingerprint(input, { width: 1280, videoCodec: 'h264', preset: 'ultrafast', crf: 30, audioCodec: 'aac' })
+  return cacheFingerprint(input, { v: 2, width: 1280, videoCodec: 'h264', preset: 'veryfast', crf: 26, gop: 'fps/2', bframes: 0, cfr: true, tune: 'fastdecode', audioCodec: 'aac' })
 }
 function shareInflight(map, key, task) {
   if (map.has(key)) return map.get(key)
@@ -143,15 +143,14 @@ async function detectBestEncoder() {
   return 'cpu'
 }
 
+const { proxyAdvice, previewProxyArgs } = require('./proxy-plan.cjs')
+
 async function createPreviewProxy(input, output, onProgress) {
   input = path.resolve(input); output = path.resolve(output)
   const info = await probe(input)
   if (!info.hasVideo || !info.width || !info.height) throw new Error('Media không có video để tạo proxy xem trước.')
   return new Promise((resolve, reject) => {
-    const args = ['-y', '-i', input, '-map', '0:v:0', '-map', '0:a?', '-vf',
-      'scale=1280:720:force_original_aspect_ratio=decrease:force_divisible_by=2',
-      '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '30', '-pix_fmt', 'yuv420p',
-      '-c:a', 'aac', '-b:a', '96k', '-movflags', '+faststart', output]
+    const args = previewProxyArgs(info, input, output)
     const ps = track(spawn(FFMPEG_PATH, args)); let err = ''
     ps.stderr.on('data', (data) => {
       err += data
@@ -260,8 +259,11 @@ function probe(input) {
       const rotation = Number(rotationValue) || 0
       const frameRateValue = String(v?.avg_frame_rate || v?.r_frame_rate || '30/1').split('/')
       const frameRate = Number(frameRateValue[0]) / (Number(frameRateValue[1]) || 1)
+      const rRate = String(v?.r_frame_rate || '').split('/'), rFps = Number(rRate[0]) / (Number(rRate[1]) || 1)
+      const vfr = hasVideo && Number.isFinite(rFps) && rFps > 0 && Number.isFinite(frameRate) && frameRate > 0 && Math.abs(rFps - frameRate) / rFps > 0.02
+      const size = data.format.size ? Number(data.format.size) : 0
       resolve({
-        duration: dur,
+        duration: dur, vfr, pixFmt: v?.pix_fmt || '', bitrate: dur > 0 && size > 0 ? Math.round(size * 8 / dur) : Number(data.format.bit_rate) || 0,
         width: hasVideo ? (v?.width || 0) : 0, height: hasVideo ? (v?.height || 0) : 0,
         fps: hasVideo && Number.isFinite(frameRate) && frameRate > 0 && frameRate <= 240 ? frameRate : 30,
         vcodec: v?.codec_name || '', acodec: a ? a.codec_name : '',
@@ -996,14 +998,23 @@ async function mixAudioTracks({ video, tracks = [], output, videoVol = 1, hasOri
   let voiceBus = mixGroup(roleIndices.voice, 'voice')
   const handled = new Set([...roleIndices.music, ...roleIndices.voice])
   const extras = trackLabels.filter((_label, i) => !handled.has(i))
+  const useOrig = hasOrigAudio && videoInfo.hasAudio
+  let origLabel = null
+  if (useOrig) { fc.push(`[0:a]volume=${Number(videoVol).toFixed(6)},${norm},apad[orig]`); origLabel = '[orig]' }
   if (ducking && musicBus && voiceBus) {
     fc.push(`${voiceBus}asplit=2[voiceout][voicesc]`, '[voicesc]apad[voicescpad]',
       `${musicBus}[voicescpad]sidechaincompress=threshold=0.03:ratio=8:attack=20:release=400[duckedmusic]`)
     musicBus = '[duckedmusic]'
     voiceBus = '[voiceout]'
+  } else if (ducking && musicBus && origLabel) {
+    // Khong co track giong rieng: nhac tu ha xuong khi tieng noi trong chinh video vang len
+    fc.push(`${origLabel}asplit=2[origout][origsc]`,
+      `${musicBus}[origsc]sidechaincompress=threshold=0.03:ratio=8:attack=20:release=400[duckedmusic]`)
+    musicBus = '[duckedmusic]'
+    origLabel = '[origout]'
   }
   const mixIns = []
-  if (hasOrigAudio && videoInfo.hasAudio) { fc.push(`[0:a]volume=${Number(videoVol).toFixed(6)},${norm},apad[orig]`); mixIns.push('[orig]') }
+  if (origLabel) mixIns.push(origLabel)
   if (musicBus) mixIns.push(musicBus)
   if (voiceBus) mixIns.push(voiceBus)
   mixIns.push(...extras)
@@ -1241,6 +1252,6 @@ module.exports = {
   extractFullFrame, saveAudioRange, ENHANCE_FILTER,
   generateThumbnails, generateWaveform, detectSilence, computeKeep, ratioDims,
   extractAudioWav, burnSubtitles, mixAudio, mixAudioTracks, exportClips, compositeVideoOverlays, encodeImageTS, crossfadeChain,
-  setEncoder, setOutputProfile, getEncoder, detectBestEncoder, createPreviewProxy, previewProxyFingerprint, buildTimelineAudioWav, buildVoiceSourceWav, concatAudioFiles, buildRedubTrack,
+  setEncoder, setOutputProfile, getEncoder, detectBestEncoder, createPreviewProxy, previewProxyFingerprint, proxyAdvice, previewProxyArgs, buildTimelineAudioWav, buildVoiceSourceWav, concatAudioFiles, buildRedubTrack,
   beginJob, runJob, endJob, cancelJob, isCancelled
 }

@@ -1,6 +1,6 @@
 // Hang so + helper dung chung giua App va cac tab
 import {
-  Film, Music, Type, Smile, Stamp, Sparkles, ArrowLeftRight, SlidersHorizontal, FileText
+  Film, Music, Type, Smile, Stamp, Sparkles, ArrowLeftRight, SlidersHorizontal, FileText, Bot
 } from 'lucide-react'
 import FILTER_PRESETS from '../shared/filter-presets.json'
 
@@ -32,6 +32,6 @@ export function filterPreviewCss(key, intensity = 100) {
 }
 export const FILTERS = FILTER_PRESETS.map((preset) => ({ ...preset, css: filterPreviewCss(preset.k, 100) }))
 export const TABS = [
-  { k: 'media', Icon: Film }, { k: 'script', Icon: FileText }, { k: 'audio', Icon: Music }, { k: 'text', Icon: Type },
+  { k: 'media', Icon: Film }, { k: 'autoedit', Icon: Bot }, { k: 'script', Icon: FileText }, { k: 'audio', Icon: Music }, { k: 'text', Icon: Type },
   { k: 'sticker', Icon: Smile }, { k: 'logo', Icon: Stamp }, { k: 'effect', Icon: Sparkles }, { k: 'trans', Icon: ArrowLeftRight }, { k: 'filter', Icon: SlidersHorizontal }
 ]

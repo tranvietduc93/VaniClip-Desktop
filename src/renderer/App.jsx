@@ -13,6 +13,8 @@ import EffectTab from './tabs/EffectTab.jsx'
 import TextTab from './tabs/TextTab.jsx'
 import AudioTab from './tabs/AudioTab.jsx'
 import ScriptTab from './tabs/ScriptTab.jsx'
+import AutoEditTab from './tabs/AutoEditTab.jsx'
+import { planToTimeline } from './auto-edit-plan.js'
 import { planSceneClips, splitSceneCaptions } from './script-plan.js'
 import FilterTab from './tabs/FilterTab.jsx'
 import StickerTab from './tabs/StickerTab.jsx'
@@ -76,6 +78,10 @@ export default function App() {
   const pendingSeekRef = useRef(null)
   const wasPlayingRef = useRef(false)
   const resumePlayRequestedRef = useRef(false)
+  const onTimeUpdateRef = useRef(null)
+  const proxyByPathRef = useRef(new Map())      // duong dan nguon -> duong dan proxy muot | null (khong can/loi)
+  const proxyQueueRef = useRef({ running: false, queue: [] })
+  const userOriginalRef = useRef(new Set())     // nguoi dung chon "dung ban goc" -> khong tu doi lai sang proxy
   const frameRef = useRef(null)
   const curRef = useRef(0) // guong cua `current` cho vong phat anh (RAF)
   const [frameH, setFrameH] = useState(0)
@@ -100,6 +106,8 @@ export default function App() {
   const [previewLoading, setPreviewLoading] = useState(false)
   const [previewError, setPreviewError] = useState('')
   const [previewProxyBusy, setPreviewProxyBusy] = useState(false)
+  const [smoothBusy, setSmoothBusy] = useState(false)
+  const [proxyTick, setProxyTick] = useState(0)
   const [previewSources, setPreviewSources] = useState({})
   const [ratio, setRatio] = useState('9:16')
   const [extraRatios, setExtraRatios] = useState([])
@@ -313,10 +321,28 @@ export default function App() {
   const videoSrc = activeClip && !activeIsImage && !activeClip.missing ? fileUrl(activePreviewOverride?.proxyPath || activeClip.path) : null
   const imageSrc = activeClip && activeIsImage && !activeClip.missing ? fileUrl(activeClip.path) : null
 
+  // Clip sau khi Tach dung chung 1 file nguon -> <video> giu nguyen src, KHONG co loadedmetadata/canplay moi.
+  // Neu van dat previewLoading=true thi se ket "dang tai" mai mai va playhead dung im o diem cat.
+  const lastVideoSrcRef = useRef(null)
   useEffect(() => {
+    const prevSrc = lastVideoSrcRef.current
+    lastVideoSrcRef.current = videoSrc
     if (!activeClip || activeClip.missing) { setPreviewLoading(false); setPreviewError(''); return }
+    const v = videoRef.current
+    if (videoSrc && prevSrc === videoSrc && v && v.readyState >= 1) {
+      setPreviewLoading(false); setPreviewError('')
+      v.playbackRate = activeClip.speed || 1
+      const target = pendingSeekRef.current
+      if (target != null) {
+        // Dang phat lien tuc qua diem cat: video da o dung cho, chi nhay khi lech > 0.3s de khong bi giat
+        if (!(wasPlayingRef.current && Math.abs(v.currentTime - target) < 0.3)) { try { v.currentTime = clamp(target, 0, Math.max(0, v.duration - 0.02)) } catch {} }
+        pendingSeekRef.current = null
+      }
+      if (wasPlayingRef.current || resumePlayRequestedRef.current) { wasPlayingRef.current = false; if (v.paused) playPreviewVideo(v) }
+      return
+    }
     setPreviewLoading(true); setPreviewError('')
-  }, [activeClip?.id, activeClip?.path, activeClip?.missing])
+  }, [activeClip?.id, activeClip?.path, activeClip?.missing, videoSrc])
   const overlapPreview = useMemo(() => {
     const sources = mapTimelineTime(timelinePlan, current)
     if (sources.length < 2) return null
@@ -819,6 +845,15 @@ export default function App() {
     addLibraryAssets([asset])
     return asset
   }
+  // Giong doc vua tao (hoac vua nap) -> thu vien Media
+  async function addGeneratedVoice(audioPath) {
+    const existing = libraryAssetsRef.current.find((item) => normalizeMediaPath(item.path) === normalizeMediaPath(audioPath))
+    if (existing) return existing
+    const media = await window.vaniclip.inspectMedia(audioPath)
+    const asset = makeLibraryAsset(audioPath, 'audio', media)
+    addLibraryAssets([asset])
+    return asset
+  }
   async function applyScriptScenes(scenes, { voice, replace = true, captions: withCaptions = true, muteVideo = true } = {}) {
     if (!scenes?.length) throw new Error(t('scr_no_asset', { i: 1 }))
     const scope = resourceScopeRef.current
@@ -860,6 +895,47 @@ export default function App() {
     const warn = transition !== 'none' ? ` ${t('scr_transition_warn')}` : ''
     setStatus(t('scr_built_n', { n: scenesOut.length, s: end.toFixed(1) }))
     return { message: t('scr_built_n', { n: scenesOut.length, s: end.toFixed(1) }) + warn }
+  }
+  // ---- AI Auto Edit: ke hoach AI (da duoc nguoi dung xem/sua) -> clip + phu de + nhac (gain da can theo giong) tren timeline ----
+  async function applyAutoEditPlan(plan, { captions: withCaptions = true, replace = true, musicAsset = null } = {}) {
+    const tl = planToTimeline(plan, { captions: withCaptions, music: musicAsset ? { assetId: musicAsset.id } : null })
+    if (!tl.clips.length) throw new Error(t('ae_empty_plan'))
+    const scope = resourceScopeRef.current
+    const mediaByAsset = new Map()
+    for (const [i, c] of tl.clips.entries()) {
+      const asset = libraryAssets.find((item) => item.id === c.assetId)
+      if (!asset || asset.missing) throw new Error(t('scr_no_asset', { i: i + 1 }))
+      if (!mediaByAsset.has(asset.id)) mediaByAsset.set(asset.id, { asset, media: await window.vaniclip.inspectMedia(asset.path) })
+    }
+    const musicMedia = musicAsset && tl.music ? await window.vaniclip.inspectMedia(musicAsset.path) : null
+    if (scope !== resourceScopeRef.current) throw new Error(t('msg_project_changed_import'))
+    const offset = replace ? 0 : timelinePlan.duration
+    const built = tl.clips.map((c) => {
+      const { asset, media } = mediaByAsset.get(c.assetId)
+      const base = makeClipFromMedia(asset.path, asset.name, media)
+      if (media.kind === 'image') return { ...base, in: 0, out: c.out, speed: 1 }
+      return { ...base, in: Math.max(0, c.in), out: Math.min(c.out, media.duration || c.out), speed: 1 }
+    })
+    pushHistory()
+    addLibraryAssets([...mediaByAsset.values()].map(({ asset, media }) => ({ ...asset, missing: false, metadata: media })))
+    if (replace) { setAutoCut(false); setKeepSegments(null) }
+    setRatio(tl.ratio)
+    setClips((items) => (replace ? built : [...items, ...built]))
+    setSelId(built[0].id)
+    built.filter((clip) => !isImg(clip)).forEach((clip) => loadThumbnails(clip.id, clip.path))
+    if (withCaptions) {
+      const shifted = tl.captions.map((caption) => ({ ...caption, start: caption.start + offset, end: caption.end + offset, id: makeEntityId('caption') }))
+      setCaptions((items) => [...(replace ? [] : items), ...shifted])
+      setCaptionTimebase('timeline')
+    }
+    if (musicMedia && tl.music) {
+      appendAudioItems([makeAudioItem({ path: musicAsset.path, name: musicAsset.name, role: 'music', start: offset, duration: tl.duration,
+        sourceDuration: musicMedia.duration, gain: tl.music.gain, loop: true })])
+      setDucking(tl.music.ducking)
+    }
+    const message = t('ae_applied', { n: built.length, s: tl.duration.toFixed(1) }) + (transition !== 'none' ? ` ${t('scr_transition_warn')}` : '')
+    setStatus(message)
+    return { message }
   }
   function updateClip(id, patch) {
     const next = clips.map((c) => c.id === id ? { ...c, ...patch } : c)
@@ -1676,6 +1752,7 @@ export default function App() {
   function useOriginalPreview() {
     if (!activeClip || !activePreviewOverride) return
     setPlaying(false); resumePlayRequestedRef.current = false
+    userOriginalRef.current.add(activeClip.path)
     const source = resolvePreviewSource(timelinePlan, current)
     pendingSeekRef.current = source?.sourceTime ?? activeClip.in
     setPreviewSources((items) => { const next = { ...items }; delete next[activeClip.id]; return next })
@@ -1695,12 +1772,72 @@ export default function App() {
     }
     if (wasPlayingRef.current || resumePlayRequestedRef.current) { wasPlayingRef.current = false; playPreviewVideo(v) }
   }
-  function onTimeUpdate() {
+  // ---- Xem truoc muot: tu tao proxy (CFR, GOP ngan, khong B-frame) cho video kho phat khi vua nap ----
+  async function pumpProxyQueue() {
+    const q = proxyQueueRef.current
+    if (q.running) return
+    q.running = true; setSmoothBusy(true)
+    try {
+      while (q.queue.length) {
+        const src = q.queue.shift()
+        try {
+          const r = await window.vaniclip.smoothProxy(src)
+          proxyByPathRef.current.set(src, r.proxyPath || null)
+          if (r.proxyPath) setProxyTick((n) => n + 1)
+        } catch { proxyByPathRef.current.set(src, null) }
+      }
+    } finally { q.running = false; setSmoothBusy(false) }
+  }
+  useEffect(() => {
+    const fresh = [...new Set(clips.filter((clip) => !isImg(clip) && !clip.missing && clip.path).map((clip) => clip.path))].filter((p) => !proxyByPathRef.current.has(p))
+    if (!fresh.length) return
+    for (const p of fresh) { proxyByPathRef.current.set(p, undefined); proxyQueueRef.current.queue.push(p) }
+    pumpProxyQueue()
+  }, [clips])
+  // Proxy xong: doi nguon xem truoc cho moi clip cung file (ke ca clip sau khi Tach). Doi luc dang dung phat de khong giat/nhay.
+  useEffect(() => {
+    if (playing) return
+    const add = {}
+    for (const clip of clips) {
+      if (isImg(clip) || clip.missing) continue
+      const proxy = proxyByPathRef.current.get(clip.path)
+      if (proxy && previewSources[clip.id]?.proxyPath !== proxy && !userOriginalRef.current.has(clip.path)) add[clip.id] = { sourcePath: clip.path, proxyPath: proxy }
+    }
+    if (!Object.keys(add).length) return
+    const src = resolvePreviewSource(timelinePlan, current)
+    if (src && add[clips[src.entryIndex]?.id]) pendingSeekRef.current = src.sourceTime
+    setPreviewSources((items) => ({ ...items, ...add }))
+  }, [proxyTick, clips, playing, previewSources])
+  // Playhead + chuyen clip theo TUNG KHUNG HINH dang hien (requestVideoFrameCallback), toi da ~25 lan/giay de khong nang giao dien
+  useEffect(() => {
+    const v = videoRef.current
+    if (!playing || !v || typeof v.requestVideoFrameCallback !== 'function') return undefined
+    let id = 0, last = 0, stopped = false
+    const step = (now, meta) => {
+      if (stopped) return
+      if (now - last >= 40) { last = now; onTimeUpdateRef.current?.(meta?.mediaTime) }
+      id = v.requestVideoFrameCallback(step)
+    }
+    id = v.requestVideoFrameCallback(step)
+    return () => { stopped = true; try { v.cancelVideoFrameCallback(id) } catch {} }
+  }, [playing, videoSrc, activeClip?.id])
+  function onTimeUpdate(mediaTime) {
     const v = videoRef.current; if (!v || !activeClip) return
-    const seg = layout.find((entry) => entry.clipId === activeClip.id && v.currentTime >= entry.sourceStart - 0.02 && v.currentTime < entry.sourceEnd - 0.02)
-      || layout.find((entry) => entry.clipId === activeClip.id && Math.abs(v.currentTime - entry.sourceEnd) < 0.06)
-    if (!seg) return
-    const gt = seg.start + (v.currentTime - seg.sourceStart) / (seg.speed || 1)
+    // mediaTime (tu requestVideoFrameCallback) = thoi diem CHINH XAC cua khung dang hien; timeupdate thuong chi ~4 lan/giay
+    const ct = typeof mediaTime === 'number' && Number.isFinite(mediaTime) ? mediaTime : v.currentTime
+    let seg = layout.find((entry) => entry.clipId === activeClip.id && ct >= entry.sourceStart - 0.02 && ct < entry.sourceEnd - 0.02)
+      || layout.find((entry) => entry.clipId === activeClip.id && Math.abs(ct - entry.sourceEnd) < 0.06)
+    let gt
+    if (seg) gt = seg.start + (ct - seg.sourceStart) / (seg.speed || 1)
+    else {
+      // timeupdate chi ~4 lan/giay: video co the vuot qua diem cat ma khong roi vao cua so +-0.06s -> truoc day return va playhead dung im.
+      // Neu da di qua het doan cuoi cua clip nay thi coi nhu vua toi diem cat va chuyen sang doan ke tiep.
+      const passed = layout.filter((entry) => entry.clipId === activeClip.id && ct >= entry.sourceEnd - 0.02)
+        .sort((a, b) => b.sourceEnd - a.sourceEnd)[0]
+      if (!passed) return
+      gt = passed.start + (passed.sourceEnd - passed.sourceStart) / (passed.speed || 1) + 0.001
+      seg = passed
+    }
     setCurrent(clamp(gt, 0, totalDuration))
     if (gt >= totalDuration - 0.04) {
       if (loop) { seekGlobal(0); if (!v.paused) playPreviewVideo(v) }
@@ -1711,10 +1848,11 @@ export default function App() {
     const nextIdx = preview ? clips.findIndex((clip) => clip.id === preview.clipId) : -1
     if (nextIdx >= 0 && nextIdx !== activeIdx) {
       wasPlayingRef.current = !v.paused; pendingSeekRef.current = preview.sourceTime; setActiveIdx(nextIdx)
-    } else if (nextIdx === activeIdx && preview.entryIndex !== seg.entryIndex && Math.abs(v.currentTime - preview.sourceTime) > 0.06) {
+    } else if (nextIdx === activeIdx && preview.entryIndex !== seg.entryIndex && Math.abs(ct - preview.sourceTime) > 0.06) {
       try { v.currentTime = preview.sourceTime } catch { pendingSeekRef.current = preview.sourceTime }
     }
   }
+  onTimeUpdateRef.current = onTimeUpdate
   const togglePlay = useCallback(() => {
     const v = videoRef.current
     if (!v) { // clip dang active la ANH: khong co <video>, dieu khien bang state (vong RAF lo phat)
@@ -2780,6 +2918,20 @@ export default function App() {
       timelines: timelines.map((entry) => ({ id: entry.id, name: entry.name, ...(entry.id !== activeTimelineId && entry.snap ? timelineContent(entry.snap) : live) }))
     })
   }
+  useEffect(() => window.vaniclip.onCloseSaveRequest?.(async () => {
+    try {
+      const snapshot = buildProject()
+      const result = await window.vaniclip.closeSaveProject(snapshot, projectPath)
+      if (result?.ok) {
+        setProjectPath(result.filePath)
+        setSavedProjectSerialized(projectKey(snapshot))
+      }
+      // Neu nguoi dung huy hop thoai chon file, cua so van mo de tiep tuc lam viec.
+    } catch (error) {
+      setStatus(t('st_err', { e: error }))
+    }
+  }), [projectPath, t])
+
   useEffect(() => {
     if (savedProjectSerialized == null) setSavedProjectSerialized(serializedProject)
     if (pendingProjectCleanRef.current) {
@@ -2787,15 +2939,8 @@ export default function App() {
       pendingProjectCleanRef.current = false
     }
   }, [serializedProject, savedProjectSerialized])
-  useEffect(() => {
-    const onBeforeUnload = (event) => {
-      if (!projectDirty) return
-      event.preventDefault()
-      event.returnValue = ''
-    }
-    window.addEventListener('beforeunload', onBeforeUnload)
-    return () => window.removeEventListener('beforeunload', onBeforeUnload)
-  }, [projectDirty])
+  // Dong ung dung duoc xu ly tai Electron main process bang hop thoai 3 lua chon;
+  // khong dung beforeunload de tranh hien them hop thoai trung lap.
   async function applyProject(data, { clean = false, filePath = '' } = {}) {
     resourceScopeRef.current++
     const loadScope = resourceScopeRef.current
@@ -3209,9 +3354,13 @@ export default function App() {
               videoOverlays={videoOverlays} updateVideoOverlay={updateVideoOverlay} beginVideoOverlayEdit={beginHistoryEdit} endVideoOverlayEdit={endHistoryEdit}
               onImport={handleImport} onImportImages={handleImportImages}
               dlBusy={dlBusy} dlStatus={dlStatus} downloadFromUrl={downloadFromUrl} cancelDownload={cancelDownload} chooseDownloadDirectory={chooseDownloadDirectory} />
+          ) : tab === 'autoedit' ? (
+            <AutoEditTab libraryAssets={libraryAssets} pickMusic={pickScriptVoice} onImport={handleImport}
+              applyPlan={applyAutoEditPlan} busyExternal={importing || exporting} onOpenExport={() => setShowExport(true)} />
           ) : tab === 'script' ? (
             <ScriptTab libraryAssets={libraryAssets} capLang={capLang} hasClips={hasClips}
-              pickVoice={pickScriptVoice} applyScenes={applyScriptScenes} busyExternal={importing || exporting} />
+              pickVoice={pickScriptVoice} applyScenes={applyScriptScenes} busyExternal={importing || exporting}
+              addVoiceAsset={addGeneratedVoice} subtitleText={captions.map((c) => c.text).join('\n')} />
           ) : tab === 'text' ? (
             <TextTab hasClips={hasClips} anyAudio={anyAudio}
               captions={captions} setCaptions={setCaptions} capBusy={capBusy} capStatus={capStatus}
@@ -3295,6 +3444,7 @@ export default function App() {
                 {activeCaption && <div className="cc-caption"><span>{activeCaption.text}</span></div>}
                 {overlayOutsideSafe && <div className="cc-safe-warning">{t('preview_safe_warning')}</div>}
                 {activePreviewOverride?.proxyPath && <div className="cc-preview-badge">{t('preview_proxy_badge')}</div>}
+                {smoothBusy && !activePreviewOverride?.proxyPath && <div className="cc-preview-badge">Đang tối ưu bản xem trước để phát mượt…</div>}
                 {previewLoading && !activeClip.missing && <div className="cc-preview-state">{t('preview_loading')}</div>}
                 {previewError && <div className="cc-preview-state error"><span>{previewError}</span>
                   {!activeIsImage && !activePreviewOverride?.proxyPath && <button className="cc-import" disabled={previewProxyBusy} onClick={tryPreviewProxy}>{previewProxyBusy ? t('preview_proxy_creating') : t('preview_proxy_create')}</button>}

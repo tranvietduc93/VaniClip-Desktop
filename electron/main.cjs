@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, shell, safeStorage, protocol, net } = require('electron')
+const { app, BrowserWindow, ipcMain, dialog, shell, safeStorage, protocol, net, session, clipboard, nativeImage } = require('electron')
 const { autoUpdater } = require('electron-updater')
 const path = require('path')
 const fs = require('fs')
@@ -84,7 +84,12 @@ let gpuEncoder = 'cpu' // tu do khi app san sang
 // Mac dinh transformers ghi vao node_modules/.../.cache => trong app.asar (file) => ENOTDIR.
 const tfCacheDir = () => path.join(app.getPath('userData'), 'ai-models')
 
+let closePromptActive = false
+let allowWindowClose = false
+
 function createWindow() {
+  allowWindowClose = false
+  closePromptActive = false
   const win = new BrowserWindow({
     width: 1280,
     height: 820,
@@ -100,6 +105,24 @@ function createWindow() {
       contextIsolation: true,
       nodeIntegration: false
     }
+  })
+
+  // Hoi luu du an truoc khi dong neu nguoi dung da thay doi noi dung.
+  win.on('close', (event) => {
+    if (allowWindowClose) return
+    event.preventDefault()
+    if (closePromptActive) return
+    closePromptActive = true
+    dialog.showMessageBox(win, {
+      type: 'question', title: 'Đóng VaniClip',
+      message: 'Bạn có muốn lưu dự án trước khi thoát không?',
+      detail: 'Lưu để có thể mở lại và tiếp tục chỉnh sửa. Không lưu sẽ bỏ các thay đổi chưa lưu.',
+      buttons: ['Lưu', 'Không lưu', 'Hủy'], defaultId: 0, cancelId: 2, noLink: true
+    }).then(({ response }) => {
+      if (win.isDestroyed()) return
+      if (response === 1) { allowWindowClose = true; win.close(); return }
+      if (response === 0) { win.webContents.send('app:close-save-request'); return }
+    }).catch((error) => { console.error('[Close prompt]', error) }).finally(() => { closePromptActive = false })
   })
 
   // Bo menu mac dinh (File/Edit/View...) - app tu co UI rieng
@@ -248,12 +271,8 @@ ipcMain.handle('video:filterPreview', async (_e, request) => {
     return `data:image/png;base64,${(await fs.promises.readFile(output)).toString('base64')}`
   } finally { try { await fs.promises.rm(output, { force: true }) } catch {} }
 })
-ipcMain.handle('video:createPreviewProxy', async (_e, filePath) => {
-  if (typeof filePath !== 'string' || !filePath.trim()) throw new Error('Đường dẫn media không hợp lệ.')
-  const source = path.resolve(filePath)
-  if (!fs.existsSync(source) || !fs.statSync(source).isFile()) throw new Error('Không tìm thấy media nguồn để tạo proxy.')
-  const info = await ops.probe(source)
-  if (!info.hasVideo) throw new Error('Media nguồn không có luồng hình để tạo proxy.')
+// Tao (hoac dung lai tu cache) proxy xem truoc cua mot file nguon
+async function ensurePreviewProxy(source) {
   const fingerprint = ops.previewProxyFingerprint(source)
   const cacheDir = path.join(app.getPath('userData'), 'preview-proxies')
   const output = path.join(cacheDir, `${fingerprint}.mp4`)
@@ -273,6 +292,26 @@ ipcMain.handle('video:createPreviewProxy', async (_e, filePath) => {
   })().finally(() => PREVIEW_PROXY_JOBS.delete(fingerprint))
   PREVIEW_PROXY_JOBS.set(fingerprint, job)
   return job
+}
+function checkedSource(filePath) {
+  if (typeof filePath !== 'string' || !filePath.trim()) throw new Error('Đường dẫn media không hợp lệ.')
+  const source = path.resolve(filePath)
+  if (!fs.existsSync(source) || !fs.statSync(source).isFile()) throw new Error('Không tìm thấy media nguồn để tạo proxy.')
+  return source
+}
+ipcMain.handle('video:createPreviewProxy', async (_e, filePath) => {
+  const source = checkedSource(filePath)
+  const info = await ops.probe(source)
+  if (!info.hasVideo) throw new Error('Media nguồn không có luồng hình để tạo proxy.')
+  return ensurePreviewProxy(source)
+})
+// Tu dong khi nap video: chi tao proxy khi file thuc su kho phat muot (VFR, HEVC, >1080p, 10-bit...). File nhe tra ve ngay {needed:false}.
+ipcMain.handle('video:smoothProxy', async (_e, filePath) => {
+  const source = checkedSource(filePath)
+  const info = await ops.probe(source)
+  const advice = ops.proxyAdvice(info)
+  if (!advice.needed) return { needed: false, reason: '', proxyPath: null }
+  return { needed: true, reason: advice.reason, proxyPath: await ensurePreviewProxy(source) }
 })
 
 // Tao dai thumbnail cho timeline
@@ -571,26 +610,287 @@ ipcMain.handle('claude:login', async (_e, key) => {
 })
 ipcMain.handle('claude:logout', () => { settingsStore.setClaudeKey(''); return settingsStore.getClaudeStatus() })
 ipcMain.handle('claude:openKeyPage', () => shell.openExternal('https://console.anthropic.com/settings/keys'))
-const claudeLiveWindows = new Map()
-ipcMain.handle('claude:openLivePage', async (_e, account = 1) => {
-  const slot = Math.max(1, Math.min(10, Number.parseInt(account, 10) || 1))
-  const existing = claudeLiveWindows.get(slot)
-  if (existing && !existing.isDestroyed()) { existing.show(); existing.focus(); return { opened: true, account: slot, reused: true } }
-  // Each slot has its own persistent Chromium session, so the user can sign into a different account per slot.
-  const win = new BrowserWindow({
-    width: 1180, height: 850, minWidth: 800, minHeight: 600,
-    title: `Claude Live — tài khoản ${slot}`,
-    webPreferences: { partition: `persist:vaniclip-claude-live-${slot}`, contextIsolation: true, nodeIntegration: false, sandbox: true }
-  })
-  claudeLiveWindows.set(slot, win)
-  win.on('closed', () => { if (claudeLiveWindows.get(slot) === win) claudeLiveWindows.delete(slot) })
-  await win.loadURL('https://claude.ai/login')
-  return { opened: true, account: slot, reused: false }
+// ============================================================
+//  Tai khoan Live phu (Claude / ChatGPT): moi tai khoan = 1 cua so web + phien Chromium rieng (partition).
+//  App chi THEO DOI co/khong co cookie phien (doc ten cookie, khong doc gia tri) va KHONG tu thao tac khung chat.
+// ============================================================
+const LIVE_SLOTS = 5
+const LIVE = {
+  claude: { label: 'Claude Live', login: 'https://claude.ai/login', home: 'https://claude.ai/new', host: 'https://claude.ai', cookie: /^sessionKey$/, partition: (n) => `persist:vaniclip-claude-live-${n}` },
+  chatgpt: { label: 'ChatGPT Live', login: 'https://chatgpt.com/auth/login', home: 'https://chatgpt.com/', host: 'https://chatgpt.com', cookie: /^__Secure-next-auth\.session-token(\.\d+)?$/, partition: (n) => `persist:vaniclip-chatgpt-live-${n}` }
+}
+const liveWindows = new Map(), liveState = new Map()
+const liveSlot = (n) => Math.max(1, Math.min(10, Number.parseInt(n, 10) || 1))
+function liveSnapshot() {
+  const out = {}
+  for (const kind of Object.keys(LIVE)) { out[kind] = {}; for (let n = 1; n <= LIVE_SLOTS; n++) out[kind][n] = liveState.get(`${kind}-${n}`) || { signedIn: false, open: false } }
+  return out
+}
+function broadcastLive() { const snap = liveSnapshot(); for (const w of BrowserWindow.getAllWindows()) { if (!w.isDestroyed()) w.webContents.send('live:changed', snap) } return snap }
+async function refreshLive(kind, n) {
+  const def = LIVE[kind]; let signedIn = false
+  try { signedIn = (await session.fromPartition(def.partition(n)).cookies.get({ url: def.host })).some((c) => def.cookie.test(c.name)) } catch {}
+  const w = liveWindows.get(`${kind}-${n}`)
+  const next = { signedIn, open: !!w && !w.isDestroyed() }, prev = liveState.get(`${kind}-${n}`)
+  liveState.set(`${kind}-${n}`, next)
+  if (!prev || prev.signedIn !== next.signedIn || prev.open !== next.open) broadcastLive()
+}
+async function openLive(kind, account) {
+  const def = LIVE[kind]; if (!def) throw new Error('Loại tài khoản Live không hợp lệ.')
+  const n = liveSlot(account), key = `${kind}-${n}`
+  const existing = liveWindows.get(key)
+  if (existing && !existing.isDestroyed()) { existing.show(); existing.focus(); return { opened: true, account: n, reused: true } }
+  // Moi tai khoan co phien Chromium rieng de dang nhap tai khoan khac nhau
+  const win = new BrowserWindow({ width: 1180, height: 850, minWidth: 800, minHeight: 600, title: `${def.label} — tài khoản ${n}`,
+    webPreferences: { partition: def.partition(n), contextIsolation: true, nodeIntegration: false, sandbox: true } })
+  liveWindows.set(key, win)
+  let timer = null
+  const soon = () => { clearTimeout(timer); timer = setTimeout(() => refreshLive(kind, n), 600) }
+  for (const ev of ['did-navigate', 'did-navigate-in-page', 'did-finish-load']) win.webContents.on(ev, soon)
+  win.webContents.setWindowOpenHandler(({ url }) => { if (/^https:\/\//.test(url)) shell.openExternal(url); return { action: 'deny' } })
+  win.on('closed', () => { clearTimeout(timer); if (liveWindows.get(key) === win) liveWindows.delete(key); refreshLive(kind, n) })
+  await refreshLive(kind, n)
+  await win.loadURL(liveState.get(key)?.signedIn ? def.home : def.login)
+  return { opened: true, account: n, reused: false }
+}
+ipcMain.handle('claude:openLivePage', (_e, account = 1) => openLive('claude', account))
+ipcMain.handle('live:open', (_e, kind, account = 1) => openLive(kind, account))
+ipcMain.handle('live:status', async () => { await Promise.all(Object.keys(LIVE).flatMap((k) => Array.from({ length: LIVE_SLOTS }, (_, i) => refreshLive(k, i + 1)))); return liveSnapshot() })
+ipcMain.handle('live:signOut', async (_e, kind, account) => {
+  const def = LIVE[kind]; if (!def) throw new Error('Loại tài khoản Live không hợp lệ.')
+  const n = liveSlot(account), w = liveWindows.get(`${kind}-${n}`)
+  if (w && !w.isDestroyed()) w.close()
+  await session.fromPartition(def.partition(n)).clearStorageData()
+  await refreshLive(kind, n); return liveSnapshot()
 })
 ipcMain.handle('claude:analyzeScript', async (_e, request = {}) => {
   const key = settingsStore.getClaudeKey()
   return require('./claude.cjs').analyzeScript({ key, script: request.script, transcript: request.transcript,
     totalDuration: request.totalDuration, media: Array.isArray(request.media) ? request.media.slice(0, 300) : [] })
+})
+
+// ============================================================
+//  Dang nhap AI co theo doi trang thai (Claude / OpenAI) + AI Auto Edit
+//  Xac thuc bang API key (luu ma hoa). KHONG doc cookie/phien cua claude.ai hay chatgpt.com:
+//  cac nha cung cap khong cho phep dung phien dang nhap web lam API, va viec do de mat tai khoan.
+//  Nut "Mo trang dang nhap" chi mo trinh duyet de ban tu lay API key.
+// ============================================================
+const AUTH_PROVIDERS = {
+  claude: { label: 'Claude', keyUrl: 'https://console.anthropic.com/settings/keys',
+    pattern: /^sk-ant-[\w-]{20,}$/, patternMsg: 'API key Claude phải bắt đầu bằng sk-ant-…' },
+  openai: { label: 'OpenAI', keyUrl: 'https://platform.openai.com/api-keys',
+    pattern: /^sk-[\w-]{20,}$/, patternMsg: 'API key OpenAI phải bắt đầu bằng sk-…' }
+}
+function authProvider(name) { const p = AUTH_PROVIDERS[name]; if (!p) throw new Error('Nhà cung cấp AI không hợp lệ.'); return p }
+function authSnapshot() {
+  const meta = settingsStore.getAuthMeta()
+  const make = (name, status) => {
+    const m = meta[name] || {}
+    const state = !status.configured ? 'signed_out' : (m.state && m.state !== 'signed_out' ? m.state : 'signed_in')
+    return { provider: name, label: AUTH_PROVIDERS[name].label, configured: status.configured, persistent: status.persistent, hint: status.hint, model: status.model || '',
+      state, verifiedAt: m.verifiedAt || null, lastError: m.lastError || '' }
+  }
+  return { claude: make('claude', settingsStore.getClaudeStatus()), openai: make('openai', settingsStore.getOpenAiStatus()) }
+}
+function broadcastAuth() {
+  const snap = authSnapshot()
+  for (const win of BrowserWindow.getAllWindows()) { if (!win.isDestroyed() && win.webContents) win.webContents.send('auth:changed', snap) }
+  return snap
+}
+async function pingProvider(name, key, model) {
+  if (name === 'claude') await require('./claude.cjs').testKey(key)
+  else await require('./openai.cjs').testKey(key, model)
+}
+function stateFromError(error) {
+  if (error?.status === 401 || error?.status === 403) return 'invalid'
+  if (error?.status === 429) return 'rate_limited'
+  return null
+}
+function markAuth(name, state, lastError = '') {
+  settingsStore.setAuthMeta(name, { state, lastError: String(lastError || '').slice(0, 300), ...(state === 'signed_in' ? { verifiedAt: Date.now() } : { verifiedAt: (settingsStore.getAuthMeta()[name] || {}).verifiedAt || null }) })
+  return broadcastAuth()
+}
+ipcMain.handle('auth:status', () => authSnapshot())
+ipcMain.handle('auth:login', async (_e, name, key, opts = {}) => {
+  const provider = authProvider(name)
+  const value = String(key || '').trim()
+  if (!provider.pattern.test(value)) throw new Error(provider.patternMsg)
+  const model = String(opts?.model || '').trim()
+  try { await pingProvider(name, value, model || undefined) } catch (error) {
+    markAuth(name, stateFromError(error) || 'signed_out', error.message)
+    throw error
+  }
+  if (name === 'claude') settingsStore.setClaudeKey(value)
+  else { settingsStore.setOpenAiKey(value); settingsStore.setOpenAiModel(model) }
+  return markAuth(name, 'signed_in')
+})
+ipcMain.handle('auth:logout', (_e, name) => {
+  authProvider(name)
+  if (name === 'claude') settingsStore.setClaudeKey(''); else settingsStore.setOpenAiKey('')
+  return markAuth(name, 'signed_out')
+})
+ipcMain.handle('auth:verify', async (_e, name) => {
+  authProvider(name)
+  const key = name === 'claude' ? settingsStore.getClaudeKey() : settingsStore.getOpenAiKey()
+  if (!key) return markAuth(name, 'signed_out')
+  try { await pingProvider(name, key, settingsStore.getOpenAiStatus().model || undefined); return markAuth(name, 'signed_in') }
+  catch (error) { const st = stateFromError(error); if (st) return markAuth(name, st, error.message); throw error }
+})
+ipcMain.handle('auth:openKeyPage', (_e, name) => shell.openExternal(authProvider(name).keyUrl))
+
+// ---- AI Auto Edit: nhieu "bo nao" cung luc (API Claude/OpenAI + tai khoan Live phu dan tay) ----
+const autoEditJobs = new Map()
+const manualPending = new Map()
+ipcMain.handle('autoedit:cancel', (_e, jobId) => { const c = autoEditJobs.get(jobId); if (!c) return false; c.abort(); return true })
+ipcMain.handle('autoedit:copy', (_e, kind, value) => {
+  if (kind === 'image') { const img = nativeImage.createFromPath(String(value)); if (img.isEmpty()) throw new Error('Không đọc được ảnh ghép.'); clipboard.writeImage(img) }
+  else clipboard.writeText(String(value || ''))
+  return true
+})
+// Doc clipboard (chi khi khung dan tay dang mo) de tu nhan ket qua sau khi nguoi dung bam Copy o cau tra loi
+ipcMain.handle('autoedit:readClipboard', () => { const t = clipboard.readText(); return t.length > 400000 ? '' : t })
+ipcMain.handle('autoedit:manualReply', (_e, jobId, text) => {
+  const p = manualPending.get(jobId); if (!p) return false
+  manualPending.delete(jobId)
+  text == null ? p.reject(Object.assign(new Error('Đã hủy AI Auto Edit.'), { cancelled: true })) : p.resolve(String(text))
+  return true
+})
+ipcMain.handle('autoedit:analyze', async (event, request = {}) => {
+  const jobId = String(request.jobId || crypto.randomUUID())
+  if (autoEditJobs.size) throw new Error('Đang có một lượt AI Auto Edit chạy.')
+  const controller = new AbortController(); autoEditJobs.set(jobId, controller)
+  const send = (p) => { if (!event.sender.isDestroyed()) event.sender.send('autoedit:progress', { jobId, ...p }) }
+  try {
+    const auto = require('./auto-edit.cjs'); auto.configure(ffmpegPath)
+    const whisper = require('./whisper.cjs'); whisper.configure(tfCacheDir())
+    const { extractJson } = require('./claude.cjs')
+    const warnings = []
+    // Moi bo nao: { id, family, label, call(parts, system, batch) -> text }
+    const apiBrain = (id, family, label, run) => ({ id, family, label, call: async (parts, system) => {
+      try { const text = await run(parts, system); markAuth(family, 'signed_in'); return text }
+      catch (error) { const st = stateFromError(error); if (st) markAuth(family, st, error.message); throw error }
+    } })
+    const liveBrain = (kind, slot) => {
+      const def = LIVE[kind]
+      return { id: `${kind}-live:${slot}`, family: kind === 'claude' ? 'claude' : 'openai', label: `${def.label} #${slot}`, manual: true, call: async (parts, system, batch) => {
+        const pkg = await auto.buildManualPackage(parts, system, { dir: path.join(batch.jobDir, 'manual'), signal: controller.signal })
+        return new Promise((resolve, reject) => {
+          const onAbort = () => { manualPending.delete(jobId); reject(Object.assign(new Error('Đã hủy AI Auto Edit.'), { cancelled: true })) }
+          controller.signal.addEventListener('abort', onAbort, { once: true })
+          manualPending.set(jobId, { resolve: (t) => { controller.signal.removeEventListener('abort', onAbort); resolve(t) }, reject })
+          openLive(kind, slot).catch(() => {})
+          try { if (pkg.sheetPath) { const img = nativeImage.createFromPath(pkg.sheetPath); if (!img.isEmpty()) clipboard.writeImage(img) } else clipboard.writeText(pkg.prompt) } catch {}
+          if (!event.sender.isDestroyed()) event.sender.send('autoedit:manual', { jobId, kind, slot, label: `${def.label} #${slot}`, index: batch.index, total: batch.total, prompt: pkg.prompt, sheetPath: pkg.sheetPath })
+        })
+      } }
+    }
+    const brains = []
+    for (const raw of Array.isArray(request.brains) ? request.brains : []) {
+      const [kind, slotStr] = String(raw).split(':'), slot = liveSlot(slotStr)
+      if (kind === 'claude-api') { const key = settingsStore.getClaudeKey(); if (key) brains.push(apiBrain('claude-api', 'claude', 'Claude API', (parts, system) => require('./claude.cjs').callWithParts({ key, parts, system }))); else warnings.push('Claude API chưa đăng nhập, bỏ qua.') }
+      else if (kind === 'openai-api') { const key = settingsStore.getOpenAiKey(); if (key) brains.push(apiBrain('openai-api', 'openai', 'OpenAI API', (parts, system) => require('./openai.cjs').callWithParts({ key, parts, system, model: settingsStore.getOpenAiStatus().model || undefined }))); else warnings.push('OpenAI API chưa đăng nhập, bỏ qua.') }
+      else if (kind === 'claude-live') brains.push(liveBrain('claude', slot))
+      else if (kind === 'chatgpt-live') brains.push(liveBrain('chatgpt', slot))
+    }
+    const ensemble = request.brainMode === 'ensemble'
+    let callPlanner = null
+    if (brains.length) callPlanner = async (parts, system, batch) => {
+      const lastError = { e: null }
+      if (!ensemble) {
+        // Du phong theo thu tu. Gap gioi han (429) thi KHONG chuyen sang tai khoan khac cung nha cung cap de ne gioi han.
+        const blocked = new Set()
+        for (const b of brains) {
+          if (blocked.has(b.family)) continue
+          send({ phase: 'plan', brain: b.label })
+          try { return await b.call(parts, system, batch) } catch (e) { if (e.cancelled) throw e; lastError.e = e; if (e.status === 429) blocked.add(b.family) }
+        }
+        throw lastError.e || new Error('Không có bộ não AI nào dùng được.')
+      }
+      const results = []
+      for (const b of brains) {
+        send({ phase: 'plan', brain: b.label })
+        try { results.push(extractJson(await b.call(parts, system, batch))) } catch (e) { if (e.cancelled) throw e; lastError.e = e; warnings.push(`${b.label}: ${e.message}`) }
+      }
+      if (!results.length) throw lastError.e || new Error('Không có bộ não AI nào dùng được.')
+      return JSON.stringify(auto.mergeEnsemble(results))
+    }
+    const assets = (Array.isArray(request.assets) ? request.assets : []).map((a) => ({ id: String(a.id), name: String(a.name || ''), path: String(a.path || ''), kind: a.kind }))
+    const result = await auto.runAutoEdit({ ...request, assets }, {
+      callPlanner, whisper, cacheDir: path.join(app.getPath('userData'), 'autoedit-cache'), signal: controller.signal,
+      probe: (p) => ops.probe(p), detectSilence: (p, o) => ops.detectSilence(p, o), computeKeep: (d, s, pad) => ops.computeKeep(d, s, pad), onProgress: send
+    })
+    return { ...result, warnings: [...warnings, ...result.warnings], engine: result.engine === 'ai' ? brains.map((b) => b.label).join(ensemble ? ' + ' : ' → ') : 'local' }
+  } finally { autoEditJobs.delete(jobId); manualPending.delete(jobId) }
+})
+
+// ============================================================
+//  Voice Studio: tao giong doc AI (Gemini nhieu khoa / ElevenLabs / Edge / local) + cua so web ho tro
+// ============================================================
+const voiceJobs = new Map()
+function voiceStudio() { const vs = require('./voice-studio.cjs'); vs.configure(ffmpegPath); return vs }
+function voiceDeps(extra = {}) {
+  const base = app.getPath('userData')
+  return { cacheDir: path.join(base, 'voice-cache'), outDir: path.join(base, 'generated', 'voice'), geminiKeys: () => settingsStore.geminiKeys(), elevenKey: () => settingsStore.getElevenKey(),
+    modelCacheDir: path.join(base, 'models', 'transformers'), ...extra }
+}
+const voiceKeyState = () => ({ gemini: settingsStore.listGeminiKeys(), eleven: settingsStore.getElevenStatus() })
+ipcMain.handle('voice:catalog', () => { const vs = voiceStudio(); return { geminiVoices: vs.GEMINI_VOICES, geminiModels: vs.GEMINI_MODELS, elevenModels: vs.ELEVEN_MODELS, edgeVoices: vs.EDGE_VOICES } })
+ipcMain.handle('voice:keys', () => voiceKeyState())
+ipcMain.handle('voice:addGemini', (_e, text) => { const r = settingsStore.addGeminiKeys(String(text || '').split(/[\r\n,;\s]+/).filter(Boolean)); return { ...r, ...voiceKeyState() } })
+ipcMain.handle('voice:removeGemini', (_e, id) => { settingsStore.removeGeminiKey(String(id)); return voiceKeyState() })
+ipcMain.handle('voice:clearGemini', () => { settingsStore.clearGeminiKeys(); return voiceKeyState() })
+ipcMain.handle('voice:toggleGemini', (_e, id, enabled) => { settingsStore.setGeminiKeyEnabled(String(id), !!enabled); return voiceKeyState() })
+ipcMain.handle('voice:testGemini', async (_e, id) => {
+  const k = settingsStore.geminiKeys().find((x) => x.id === String(id)); if (!k) throw new Error('Không tìm thấy khóa.')
+  return voiceStudio().testGeminiKey(k.key)
+})
+ipcMain.handle('voice:setEleven', (_e, key) => { settingsStore.setElevenKey(key); return voiceKeyState() })
+ipcMain.handle('voice:elevenVoices', async () => { const key = settingsStore.getElevenKey(); if (!key) throw new Error('Chưa nhập ElevenLabs API key.'); return voiceStudio().elevenVoices(key) })
+ipcMain.handle('voice:cancel', (_e, jobId) => { const c = voiceJobs.get(jobId); if (!c) return false; c.abort(); return true })
+ipcMain.handle('voice:generate', async (event, job = {}, jobId = crypto.randomUUID()) => {
+  if (voiceJobs.size) throw new Error('Đang có một lượt tạo giọng đọc chạy.')
+  const controller = new AbortController(); voiceJobs.set(jobId, controller)
+  const send = (p) => { if (!event.sender.isDestroyed()) event.sender.send('voice:progress', { jobId, ...p }) }
+  try {
+    const text = String(job.text || '')
+    if (text.length > 2_000_000) throw new Error('Văn bản quá dài (tối đa 2.000.000 ký tự mỗi lượt).')
+    const clean = {
+      engine: ['gemini', 'elevenlabs', 'edge', 'local'].includes(job.engine) ? job.engine : 'gemini', lang: job.lang === 'vi' ? 'vi' : 'en', text,
+      mode: job.mode === 'sentence' ? 'sentence' : 'line', defaultPause: Math.max(0, Math.min(10, Number(job.defaultPause) || 0.5)), gap: Math.max(0, Math.min(10, Number(job.gap) || 0)),
+      emotion: String(job.emotion || 'natural'), style: String(job.style || '').slice(0, 300),
+      gemini: { voice: String(job.gemini?.voice || 'Kore'), model: String(job.gemini?.model || '') }, eleven: { voiceId: String(job.eleven?.voiceId || ''), model: String(job.eleven?.model || '') },
+      edge: { voice: String(job.edge?.voice || '') }, onlyLine: Number.isInteger(job.onlyLine) ? job.onlyLine : undefined
+    }
+    return await voiceStudio().generate(clean, voiceDeps({ signal: controller.signal, onProgress: send }))
+  } finally { voiceJobs.delete(jobId) }
+})
+ipcMain.handle('voice:openTextFile', async () => {
+  const res = await dialog.showOpenDialog({ title: 'Chọn file lời đọc', properties: ['openFile'], filters: [{ name: 'Text / SRT', extensions: ['txt', 'srt', 'md'] }] })
+  if (res.canceled || !res.filePaths.length) return null
+  const file = res.filePaths[0]
+  if (fs.statSync(file).size > 10 * 1024 * 1024) throw new Error('File quá lớn (tối đa 10 MB).')
+  const raw = fs.readFileSync(file, 'utf8')
+  return { name: path.basename(file), text: /\.srt$/i.test(file) ? voiceStudio().srtToLines(raw) : raw.replace(/^\uFEFF/, '') }
+})
+// Nho Claude: goi y the cam xuc / tach khuc + khoang lang. mode 'api' = goi API; 'prompt' = tra cau lenh de dan vao claude.ai (Claude Live)
+ipcMain.handle('voice:aiAssist', async (_e, kind, payload = {}, mode = 'api') => {
+  if (!['emotion', 'map'].includes(kind)) throw new Error('Yêu cầu không hợp lệ.')
+  const text = String(payload.text || '').trim(); if (!text) throw new Error('Chưa có lời đọc.')
+  if (text.length > 60000) throw new Error('Văn bản quá dài cho một lượt AI (tối đa 60.000 ký tự). Hãy chia nhỏ.')
+  const prompt = voiceStudio().buildAiPrompt(kind, { text, level: payload.level, lang: payload.lang })
+  if (mode === 'prompt') return { prompt: `${prompt.system}\n\n${prompt.user}` }
+  const claude = require('./claude.cjs'), key = settingsStore.getClaudeKey()
+  try { return { text: (await claude.callClaude({ key, model: claude.MODEL, system: prompt.system, user: prompt.user, maxTokens: 16000 })).trim().replace(/^```[a-z]*\n?|\n?```$/g, '') } }
+  catch (error) { const st = stateFromError(error); if (st) markAuth('claude', st, error.message); throw error }
+})
+const geminiWebWindows = new Map()
+ipcMain.handle('voice:openGeminiWeb', async (_e, account = 1) => {
+  const n = Math.max(1, Math.min(5, Number.parseInt(account, 10) || 1)), existing = geminiWebWindows.get(n)
+  if (existing && !existing.isDestroyed()) { existing.show(); existing.focus(); return { opened: true } }
+  const win = new BrowserWindow({ width: 1180, height: 850, title: `Gemini web — tài khoản ${n}`, webPreferences: { partition: `persist:vaniclip-gemini-web-${n}`, contextIsolation: true, nodeIntegration: false, sandbox: true } })
+  geminiWebWindows.set(n, win); win.on('closed', () => { if (geminiWebWindows.get(n) === win) geminiWebWindows.delete(n) })
+  win.webContents.setWindowOpenHandler(({ url }) => { if (/^https:\/\/([a-z0-9-]+\.)?(google|gstatic)\.com(\/|$)/i.test(url)) return { action: 'allow' }; if (/^https:\/\//.test(url)) shell.openExternal(url); return { action: 'deny' } })
+  await win.loadURL('https://aistudio.google.com/'); return { opened: true }
 })
 
 // Tai video tu link (YouTube/TikTok/... qua yt-dlp) ve Downloads\VaniClip -> tra ve path
@@ -766,6 +1066,28 @@ ipcMain.handle('project:save', async (_e, data, currentPath) => {
 ipcMain.handle('project:write', (_e, filePath, data) => {
   if (typeof filePath !== 'string' || !filePath.trim()) throw new Error('Đường dẫn dự án không hợp lệ.')
   return projectStore.writeProject(filePath, data)
+})
+
+ipcMain.handle('app:close-save', async (event, data, currentPath) => {
+  const win = BrowserWindow.fromWebContents(event.sender)
+  try {
+    let targetPath = typeof currentPath === 'string' && currentPath.trim() ? currentPath : ''
+    if (!targetPath) {
+      const result = await dialog.showSaveDialog(win, {
+        title: 'Lưu dự án trước khi thoát', defaultPath: 'vaniclip-project.vaniclip',
+        filters: [{ name: 'VaniClip Project', extensions: ['vaniclip'] }]
+      })
+      if (result.canceled || !result.filePath) return { ok: false, canceled: true }
+      targetPath = result.filePath
+    }
+    projectStore.writeProject(targetPath, data)
+    allowWindowClose = true
+    if (win && !win.isDestroyed()) win.close()
+    return { ok: true, filePath: targetPath }
+  } catch (error) {
+    dialog.showErrorBox('Không thể lưu dự án', String(error.message || error))
+    return { ok: false, error: String(error.message || error) }
+  }
 })
 
 // Mo du an

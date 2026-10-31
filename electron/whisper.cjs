@@ -56,12 +56,12 @@ function decodeWav(buf) {
 }
 
 // Nhan dang -> tra ve [{start,end,text}] (thoi gian theo nguon)
-async function transcribe(wavPath, { language = 'vietnamese', model = 'Xenova/whisper-base', onStatus } = {}) {
+async function transcribe(wavPath, { language = 'vietnamese', model = 'Xenova/whisper-base', task = 'transcribe', onStatus } = {}) {
   const pipe = await getPipe(model, onStatus)
   if (onStatus) onStatus({ phase: 'transcribe' })
   const audio = decodeWav(fs.readFileSync(wavPath))
   const res = await pipe(audio, {
-    ...(language ? { language } : {}), task: 'transcribe', return_timestamps: true,
+    ...(language ? { language } : {}), task: task === 'translate' ? 'translate' : 'transcribe', return_timestamps: true,
     chunk_length_s: 30, stride_length_s: 5
   })
   const chunks = res.chunks || []

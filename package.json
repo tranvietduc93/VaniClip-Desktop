@@ -1,6 +1,6 @@
 {
   "name": "vaniclip-desktop",
-  "version": "0.4.3",
+  "version": "0.4.4",
   "description": "VaniClip Desktop - App tao & chinh sua clip ngan (PoC)",
   "author": "VaniClip",
   "main": "electron/main.cjs",
@@ -12,7 +12,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "test": "npm run test:unit && node test-ffmpeg.cjs",
-    "test:unit": "node test-project-model.mjs && node test-tracks.mjs && node test-timelines.mjs && node test-script-plan.mjs && node test-commands.mjs && node test-static.cjs",
+    "test:unit": "node test-project-model.mjs && node test-tracks.mjs && node test-timelines.mjs && node test-script-plan.mjs && node test-commands.mjs && node test-auto-edit.mjs && node test-split-playback.mjs && node test-voice-studio.cjs && node test-proxy-plan.cjs && node test-static.cjs",
     "test:e2e": "node e2e/run.cjs",
     "test:ai": "node test-ai.cjs",
     "dist": "vite build && electron-builder",
@@ -23,7 +23,8 @@
     "dist:mac:arm64": "vite build && electron-builder --mac dmg zip --arm64",
     "publish:win": "npm run build && electron-builder --win nsis --publish always",
     "publish:mac": "npm run build && electron-builder --mac dmg zip --publish always",
-    "publish:all": "npm run build && electron-builder --win nsis --mac dmg zip --publish always"
+    "publish:all": "npm run build && electron-builder --win nsis --mac dmg zip --publish always",
+    "test:autoedit": "node test-auto-edit-pipeline.cjs"
   },
   "dependencies": {
     "@huggingface/transformers": "^4.2.0",
@@ -109,5 +110,8 @@
         "releaseType": "release"
       }
     ]
+  },
+  "optionalDependencies": {
+    "msedge-tts": "^2.0.0"
   }
 }

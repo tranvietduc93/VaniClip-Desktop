@@ -16,6 +16,15 @@
 - Xuất MP4 bằng CPU hoặc encoder GPU khả dụng, chọn chất lượng (Cao/Chuẩn/Nhỏ gọn), độ phân giải cạnh ngắn (720/1080/1440) và xuất nhiều tỉ lệ. Tốc độ khung hình xuất cố định 30 fps; tỉ lệ Gốc giữ kích thước của clip đầu tiên.
 - Tải media từ URL, dùng Google Cloud TTS và đổi khuôn mặt là các tính năng tùy chọn cần kết nối/cấu hình phù hợp.
 
+## AI Auto Edit (tab "AI Tự dựng")
+
+Nhập câu lệnh tiếng Việt → AI tự lấy toàn bộ video/ảnh trong thư viện Media, dò cảnh (FFmpeg), cắt khoảng lặng, nhận dạng lời thoại tiếng Việt (Whisper cục bộ, cắt cửa sổ theo RAM), lấy khung hình đại diện cho từng đoạn rồi gửi cho Claude hoặc OpenAI **xem ảnh + đọc lời thoại** để chọn/sắp xếp cảnh. Bạn xem trước (bỏ/đổi thứ tự cảnh) rồi bấm **Áp dụng vào timeline**: clip, phụ đề, tỷ lệ 16:9 / 9:16 / 1:1, nhạc nền (âm lượng tự cân theo giọng đo được) và ducking đều được đặt sẵn; sau đó xuất bằng hộp thoại Xuất hiện có.
+
+- Không khóa 60 giây: để trống thời lượng = linh hoạt; hoặc đặt giới hạn tối đa. Video dài chia lô (số khung hình/lượt, model Whisper, cửa sổ âm thanh tự giảm khi ít RAM/CPU).
+- Chưa đăng nhập AI → bộ lập kế hoạch cục bộ (giữ đoạn có lời thoại, không xem ảnh).
+- Đăng nhập bằng **API key** (Claude, OpenAI), lưu mã hóa; trạng thái (đã xác thực / không hợp lệ / chạm giới hạn) được main theo dõi và đẩy về giao diện. VaniClip **không** đọc cookie/phiên của claude.ai hay chatgpt.com.
+- Kiểm thử: `npm run test:unit` (gồm `test-auto-edit.mjs`), `npm run test:autoedit` (pipeline thật với FFmpeg, Whisper/AI giả lập).
+
 ## Yêu cầu
 
 - Windows 10/11 x64: có thể đóng gói installer Windows bằng `npm run dist`.
@@ -94,3 +103,13 @@ Bộ sticker trong `src/renderer/public/stickers/twemoji/` lấy từ [Twemoji](
 ## License
 
 Mã nguồn VaniClip Desktop được phát hành theo MIT License. Xem [LICENSE](LICENSE).
+
+
+## Cập nhật: Live phụ, nhiều bộ não, Tạo giọng đọc AI
+
+- **Tab Kịch bản**: bỏ khung AI Tự dựng; có *Tài khoản Claude Live phụ* và *ChatGPT Live phụ* (5 tài khoản mỗi loại, phiên đăng nhập riêng, chấm xanh = đã đăng nhập). Khối giọng đọc có nút **Tạo giọng đọc** mở cửa sổ *Tạo giọng đọc AI*.
+- **Tạo giọng đọc AI** (`src/renderer/VoiceStudio.jsx`, `electron/voice-studio.cjs`): Gemini TTS (nhiều khóa, 30 giọng), ElevenLabs API, Edge miễn phí (`msedge-tts`, tùy chọn) / giọng cục bộ tiếng Việt, cửa sổ web ElevenLabs/Gemini để tự tạo rồi nạp file. Văn bản không giới hạn: tạo từng dòng (cache theo nội dung), ghép 1 mp3 có khoảng lặng `( 1.2s | mô tả )`, thẻ cảm xúc, kênh lưu bộ giọng.
+- **AI Tự dựng**: bỏ đăng nhập web; chọn **nhiều bộ não** (Claude/OpenAI API + các tài khoản Live đã đăng nhập) theo chế độ *Dự phòng* hoặc *Hội ý*; phụ đề tiếng Anh có thêm chế độ dịch từ giọng tiếng Việt.
+- Sửa lỗi playhead đứng im sau khi Tách clip.
+- Kiểm thử: `npm run test:unit` (có `test-voice-studio.cjs`), `npm run test:autoedit`.
+- **Xem trước mượt, chuẩn khung hình**: khi nạp video khó phát (VFR, HEVC/AV1/ProRes, >1080p, 10-bit, bitrate cao, >60fps) app tự tạo proxy 720p CFR, GOP nửa giây, không B-frame ở nền và đổi nguồn xem trước khi bạn dừng phát; playhead và chuyển clip chạy theo từng khung hình (`requestVideoFrameCallback`). Xuất video vẫn dùng file gốc.

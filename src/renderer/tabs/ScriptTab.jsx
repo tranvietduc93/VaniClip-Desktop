@@ -1,14 +1,46 @@
 import React, { useEffect, useMemo, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { useI18n } from '../i18n.jsx'
 import { fmt } from '../utils.js'
 import { assignMedia } from '../script-plan.js'
+import VoiceStudio from '../VoiceStudio.jsx'
 
 // Tab Kich ban: gui ca kich ban va (neu chon) giong doc da can moc thoi gian cho Claude -> chia canh -> dung vao timeline
-export default function ScriptTab({ libraryAssets, capLang, hasClips, pickVoice, applyScenes, busyExternal }) {
+// Tai khoan Live phu (Claude / ChatGPT): moi tai khoan 1 cua so web + phien rieng. Trang thai dang nhap duoc theo doi (chi kiem tra co cookie phien).
+function LiveAccounts({ kind, title, hint, onError }) {
+  const [live, setLive] = useState(null)
+  useEffect(() => {
+    window.vaniclip.liveStatus().then(setLive).catch(() => {})
+    return window.vaniclip.onLiveChanged(setLive)
+  }, [])
+  return (
+    <div className="scr-auth" style={{ marginTop: 8 }}>
+      <small className="cap-hint">{title}</small>
+      <div className="scr-row" style={{ flexWrap: 'wrap', marginTop: 8 }}>
+        {[1, 2, 3, 4, 5].map((n) => {
+          const st = live?.[kind]?.[n]
+          return (
+            <span key={n} className="live-acc">
+              <button className="cc-auto" title={st?.signedIn ? 'Đã đăng nhập' : 'Chưa đăng nhập'} onClick={() => window.vaniclip.liveOpen(kind, n).catch((e) => onError(String(e.message || e)))}>
+                <i className={`live-dot ${st?.signedIn ? 'on' : ''}`} />Mở acc #{n}
+              </button>
+              {st?.signedIn && <button className="cap-del" title="Đăng xuất tài khoản này" onClick={() => window.vaniclip.liveSignOut(kind, n).then(setLive).catch((e) => onError(String(e.message || e)))}>✕</button>}
+            </span>
+          )
+        })}
+      </div>
+      <small className="cap-hint">{hint}</small>
+    </div>
+  )
+}
+
+export default function ScriptTab({ libraryAssets, capLang, hasClips, pickVoice, applyScenes, busyExternal, addVoiceAsset, subtitleText = '' }) {
   const { t } = useI18n()
   const [auth, setAuth] = useState({ configured: false, hint: '' })
   const [keyInput, setKeyInput] = useState('')
   const [authBusy, setAuthBusy] = useState(false)
+  const [openai, setOpenai] = useState({ configured: false, hint: '' })
+  const [openaiKey, setOpenaiKey] = useState('')
   const [authError, setAuthError] = useState('')
   const [script, setScript] = useState('')
   const [voiceId, setVoiceId] = useState('')
@@ -17,13 +49,14 @@ export default function ScriptTab({ libraryAssets, capLang, hasClips, pickVoice,
   const [status, setStatus] = useState('')
   const [limitNotice, setLimitNotice] = useState('')
   const [opts, setOpts] = useState({ replace: true, captions: true, muteVideo: true })
+  const [studioOpen, setStudioOpen] = useState(false)
 
   const visuals = useMemo(() => libraryAssets.filter((a) => (a.kind === 'video' || a.kind === 'image') && !a.missing), [libraryAssets])
   const voices = useMemo(() => libraryAssets.filter((a) => a.kind === 'audio' && !a.missing), [libraryAssets])
   const voice = voices.find((a) => a.id === voiceId) || null
 
   // Tu dong dang nhap: key da luu ma hoa -> chi can hoi trang thai
-  useEffect(() => { window.vaniclip.claudeStatus().then(setAuth).catch(() => {}) }, [])
+  useEffect(() => { window.vaniclip.claudeStatus().then(setAuth).catch(() => {}); window.vaniclip.authStatus().then((a) => setOpenai(a.openai)).catch(() => {}) }, [])
 
   async function login() {
     setAuthBusy(true); setAuthError('')
@@ -82,24 +115,36 @@ export default function ScriptTab({ libraryAssets, capLang, hasClips, pickVoice,
         )}
       </div>
       <div className="scr-auth" style={{ marginTop: 8 }}>
-        <small className="cap-hint">Tài khoản Claude Live phụ — mỗi nút mở một cửa sổ có phiên đăng nhập riêng:</small>
-        <div className="scr-row" style={{ flexWrap: 'wrap', marginTop: 8 }}>
-          {[1, 2, 3, 4, 5].map((account) => <button key={account} className="cc-auto" onClick={async () => { try { await window.vaniclip.claudeOpenLivePage(account); setAuthError(`Đã mở Claude Live #${account}. Đăng nhập tài khoản tương ứng trong cửa sổ riêng.`) } catch (e) { setAuthError(String(e.message || e)) } }}>Mở acc #{account}</button>)}
-        </div>
-        <small className="cap-hint">Chuyển tài khoản thủ công khi cần. Phân tích kịch bản trong VaniClip vẫn dùng Anthropic API key; phiên Claude Live không thay thế API key và không tự động né giới hạn sử dụng.</small>
-        {authError && <small className="cap-warn">{authError}</small>}
+        <small className="cap-hint">OpenAI API key (tùy chọn) — làm “bộ não” cho tab AI Tự dựng:</small>
+        {openai.configured ? (
+          <div className="scr-row"><span>Đã lưu {openai.hint}</span><button className="cc-auto" onClick={async () => setOpenai((await window.vaniclip.authLogout('openai')).openai)}>Đăng xuất</button></div>
+        ) : (
+          <div className="scr-row">
+            <input type="password" placeholder="sk-…" value={openaiKey} onChange={(e) => setOpenaiKey(e.target.value)} style={{ flex: 1 }} />
+            <button className="cc-import" disabled={!openaiKey.trim() || authBusy} onClick={async () => { setAuthBusy(true); setAuthError(''); try { setOpenai((await window.vaniclip.authLogin('openai', openaiKey, {})).openai); setOpenaiKey('') } catch (e) { setAuthError(String(e.message || e).replace(/^Error invoking remote method '[^']+': (Error: )?/, '')) } finally { setAuthBusy(false) } }}>Đăng nhập</button>
+          </div>
+        )}
       </div>
+      <LiveAccounts kind="claude" title="Tài khoản Claude Live phụ — mỗi nút mở một cửa sổ có phiên đăng nhập riêng:" onError={setAuthError}
+        hint="Dấu chấm xanh = đã đăng nhập. Tài khoản đã đăng nhập dùng được làm “bộ não” cho tab AI Tự dựng (dán tay). Phân tích kịch bản bên dưới vẫn dùng Anthropic API key; phiên Live không tự thay thế API key và không tự động né giới hạn sử dụng." />
+      <LiveAccounts kind="chatgpt" title="Tài khoản ChatGPT Live phụ — mỗi nút mở một cửa sổ có phiên đăng nhập riêng:" onError={setAuthError}
+        hint="Cũng dùng được làm “bộ não” cho tab AI Tự dựng (dán tay). VaniClip chỉ kiểm tra có phiên đăng nhập hay chưa, không đọc cookie và không tự thao tác khung chat." />
+      {authError && <small className="cap-warn">{authError}</small>}
 
       <label className="scr-label">{t('scr_script')}</label>
       <textarea className="scr-text" rows={9} value={script} onChange={(e) => setScript(e.target.value)} placeholder={t('scr_script_ph')} />
 
-      <label className="scr-label">{t('scr_voice')}</label>
+      <label className="scr-label">🎙 {t('scr_voice')}</label>
       <div className="scr-row">
         <select value={voiceId} onChange={(e) => setVoiceId(e.target.value)} style={{ flex: 1 }}>
           <option value="">{t('scr_voice_none')}</option>
           {voices.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
         </select>
         <button className="cc-auto" onClick={async () => { const a = await pickVoice(); if (a) setVoiceId(a.id) }}>{t('scr_voice_pick')}</button>
+      </div>
+      <div className="vs-launch">
+        <b>✨ Tạo giọng đọc AI</b> <small>(không giới hạn văn bản, có cảm xúc) — rồi nạp vào đây</small>
+        <button className="cc-import" type="button" onClick={() => setStudioOpen(true)}>▷ Tạo giọng đọc</button>
       </div>
       <small className="cap-hint">{voice ? t('scr_voice_hint') : t('scr_estimate_hint')}</small>
       <small className="cap-hint">{t('scr_media_count', { n: visuals.length })}</small>
@@ -135,6 +180,15 @@ export default function ScriptTab({ libraryAssets, capLang, hasClips, pickVoice,
         </>
       )}
       {status && (scenes.length > 0 || !busy) && <small className="cap-hint">{status}</small>}
+      {studioOpen && createPortal(
+        <VoiceStudio subtitleText={subtitleText} onClose={() => setStudioOpen(false)}
+          onDone={async (r) => {
+            const asset = await addVoiceAsset(r.path)
+            if (asset) setVoiceId(asset.id)
+            if (r.text && !r.imported && !script.trim()) setScript(r.text.split(/\r?\n/).filter((l) => l.trim() && !/^\(\s*[\d.,]*\s*s?\s*(\|[^)]*)?\)$/.test(l.trim())).join('\n'))
+            setStatus(r.imported ? 'Đã nạp file giọng đọc vào thư viện Media.' : `Đã tạo giọng đọc ${r.duration.toFixed(1)}s (${r.lines.length} dòng) và nạp vào thư viện Media.`)
+            if (!r.imported) setStudioOpen(false)
+          }} />, document.body)}
     </div>
   )
 }

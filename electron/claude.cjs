@@ -26,13 +26,24 @@ async function callClaude({ key, model, system, user, maxTokens = 8000, timeoutM
   const body = await res.json().catch(() => ({}))
   if (!res.ok) {
     const detail = body?.error?.message || res.statusText
-    if (res.status === 401) throw new Error('API key không hợp lệ hoặc đã bị thu hồi. Hãy đăng nhập lại.')
-    if (res.status === 403) throw new Error(`API key không có quyền dùng model này: ${detail}`)
-    if (res.status === 429) throw new Error('Claude đang giới hạn tốc độ hoặc hết hạn mức. Thử lại sau ít phút.')
-    if (res.status === 400 && /credit/i.test(detail)) throw new Error('Tài khoản API hết credit. Nạp thêm tại console.anthropic.com.')
-    throw new Error(`Claude lỗi ${res.status}: ${detail}`)
+    const fail = (message) => Object.assign(new Error(message), { status: res.status })
+    if (res.status === 401) throw fail('API key không hợp lệ hoặc đã bị thu hồi. Hãy đăng nhập lại.')
+    if (res.status === 403) throw fail(`API key không có quyền dùng model này: ${detail}`)
+    if (res.status === 429) throw fail('Claude đang giới hạn tốc độ hoặc hết hạn mức. Thử lại sau ít phút.')
+    if (res.status === 400 && /credit/i.test(detail)) throw fail('Tài khoản API hết credit. Nạp thêm tại console.anthropic.com.')
+    throw fail(`Claude lỗi ${res.status}: ${detail}`)
   }
   return (body.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('')
+}
+
+// parts: [{type:'text',text} | {type:'image',mime,base64}] -> khoi noi dung da xen ke van ban / anh cua Anthropic
+function partsToContent(parts) {
+  return parts.map((p) => p.type === 'image'
+    ? { type: 'image', source: { type: 'base64', media_type: p.mime || 'image/jpeg', data: p.base64 } }
+    : { type: 'text', text: String(p.text || '') })
+}
+async function callWithParts({ key, parts, system, model = MODEL }) {
+  return callClaude({ key, model, system, user: partsToContent(parts), maxTokens: 6000, timeoutMs: 240000 })
 }
 
 async function testKey(key) {
@@ -119,4 +130,4 @@ async function analyzeScript({ key, script, transcript = null, totalDuration = n
   return normalizeScenes(parsed.scenes, { totalDuration, mediaCount: media.length })
 }
 
-module.exports = { analyzeScript, testKey, normalizeScenes, extractJson, buildUserPrompt }
+module.exports = { callClaude, MODEL, analyzeScript, testKey, normalizeScenes, extractJson, buildUserPrompt, callWithParts, partsToContent }
