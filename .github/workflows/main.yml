@@ -1,0 +1,114 @@
+name: Build and Release VaniClip
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: vaniclip-release
+  cancel-in-progress: false
+
+jobs:
+  build-windows:
+    name: Build Windows
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build renderer
+        run: npm run build
+
+      - name: Build Windows installer
+        run: npx electron-builder --win nsis --publish never
+
+      - name: Upload Windows release files
+        uses: actions/upload-artifact@v4
+        with:
+          name: vaniclip-windows
+          path: |
+            release/*.exe
+            release/*.exe.blockmap
+            release/latest.yml
+          if-no-files-found: error
+          retention-days: 7
+
+  build-macos:
+    name: Build macOS
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build renderer
+        run: npm run build
+
+      - name: Build macOS installers
+        run: npx electron-builder --mac dmg zip --publish never
+
+      - name: Upload macOS release files
+        uses: actions/upload-artifact@v4
+        with:
+          name: vaniclip-macos
+          path: |
+            release/*.dmg
+            release/*.zip
+            release/latest-mac.yml
+            release/*.blockmap
+          if-no-files-found: error
+          retention-days: 7
+
+  publish-release:
+    name: Publish GitHub Release
+    needs:
+      - build-windows
+      - build-macos
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download Windows files
+        uses: actions/download-artifact@v4
+        with:
+          name: vaniclip-windows
+          path: release
+
+      - name: Download macOS files
+        uses: actions/download-artifact@v4
+        with:
+          name: vaniclip-macos
+          path: release
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          TAG="v${VERSION}"
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --target "$GITHUB_SHA" --title "VaniClip ${VERSION}" --notes "VaniClip ${VERSION} release"
+          gh release upload "$TAG" release/* --clobber
